@@ -1,5 +1,4 @@
 import os
-import random
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -7,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.utils import get
 import google.generativeai as genai
+import methods
 
 # --- Environment and API Setup ---
 load_dotenv()
@@ -20,8 +20,8 @@ if GEMINI_API_KEY:
 
 # --- Bot Definition ---
 class VexBot(discord.Client):
-    def __init__(self, *, intents: discord.Intents):
-        super().__init__(intents=intents)
+    def __init__(self, *, bot_intents: discord.Intents):
+        super().__init__(intents=bot_intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
@@ -40,7 +40,7 @@ intents.members = True # Required for member management
 # Add a configurable text command prefix (can be overridden in .env)
 COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
-client = VexBot(intents=intents)
+client = VexBot(bot_intents=intents)
 
 # --- Events ---
 @client.event
@@ -50,32 +50,24 @@ async def on_ready():
 
 # --- Slash Commands ---
 
-# ... (roll and ask commands are unchanged) ...
 @client.tree.command(description="Roll a dice.")
 @app_commands.describe(number="The maximum number to roll (defaults to 100).")
 async def roll(interaction: discord.Interaction, number: int = 100):
-    if number <= 0:
-        await interaction.response.send_message("Please provide a positive number.", ephemeral=True)
-        return
-    roll_result = random.randint(1, number)
-    await interaction.response.send_message(f"🎲 You rolled a **{roll_result}** (1-{number})!")
+    result = await methods.execute_roll(number)
+    if "Please provide a positive number." in result:
+        await interaction.response.send_message(result, ephemeral=True)
+    else:
+        await interaction.response.send_message(result)
 
 @client.tree.command(description="Ask a question to the Gemini model.")
 @app_commands.describe(prompt="The question you want to ask.")
 async def ask(interaction: discord.Interaction, prompt: str):
-    if not genai:
-         await interaction.response.send_message("Gemini API is not configured.", ephemeral=True)
-         return
     await interaction.response.defer(thinking=True)
-    try:
-        model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-        response = await model.generate_content_async(prompt)
-        if len(response.text) > 1980:
-            await interaction.followup.send(f"**Question:** {prompt}\n\n**Answer:** {response.text[:1980]}...")
-        else:
-            await interaction.followup.send(f"**Question:** {prompt}\n\n**Answer:** {response.text}")
-    except Exception as e:
-        await interaction.followup.send(f"An error occurred: {e}", ephemeral=True)
+    result = await methods.execute_ask(prompt)
+    if "An error occurred" in result or "not configured" in result:
+         await interaction.followup.send(result, ephemeral=True)
+    else:
+         await interaction.followup.send(result)
 
 
 # --- Moderation Commands ---
@@ -169,8 +161,7 @@ async def on_message(message: discord.Message):
         args = parts[1:]
 
         if cmd == "ping":
-            latency_ms = round(client.latency * 1000)
-            await message.channel.send(f"Pong! {latency_ms}ms")
+            await message.channel.send(methods.execute_ping(client.latency))
             return
 
         if cmd == "roll":
@@ -181,8 +172,8 @@ async def on_message(message: discord.Message):
                 except ValueError:
                     await message.channel.send("Please provide a valid positive integer for roll, e.g. `!roll 20`.")
                     return
-            roll_result = random.randint(1, max_n)
-            await message.channel.send(f"🎲 You rolled a **{roll_result}** (1-{max_n})!")
+            result = await methods.execute_roll(max_n)
+            await message.channel.send(result)
             return
 
         if cmd == "ask":
@@ -190,16 +181,9 @@ async def on_message(message: discord.Message):
                 await message.channel.send("Usage: `!ask <your question>`")
                 return
             prompt = " ".join(args)
-            if not GEMINI_API_KEY:
-                await message.channel.send("Gemini API is not configured.")
-                return
             async with message.channel.typing():
-                try:
-                    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-                    response = await model.generate_content_async(prompt)
-                    await safe_send(message.channel, f"**Question:** {prompt}\n\n**Answer:** {response.text}")
-                except Exception as e:
-                    await message.channel.send(f"An error occurred while contacting Gemini: {e}")
+                result = await methods.execute_ask(prompt)
+                await safe_send(message.channel, result)
             return
 
         if cmd in ("help", "commands"):
@@ -229,8 +213,7 @@ async def on_message(message: discord.Message):
         args = parts[1:]
 
         if cmd == "ping":
-            latency_ms = round(client.latency * 1000)
-            await message.channel.send(f"Pong! {latency_ms}ms")
+            await message.channel.send(methods.execute_ping(client.latency))
             return
         if cmd == "roll":
             max_n = 100
@@ -240,24 +223,17 @@ async def on_message(message: discord.Message):
                 except ValueError:
                     await message.channel.send("Please provide a valid positive integer for roll, e.g. `roll 20!`.")
                     return
-            roll_result = random.randint(1, max_n)
-            await message.channel.send(f"🎲 You rolled a **{roll_result}** (1-{max_n})!")
+            result = await methods.execute_roll(max_n)
+            await message.channel.send(result)
             return
         if cmd == "ask":
             if not args:
                 await message.channel.send("Usage: `ask <your question>!`")
                 return
             prompt = " ".join(args)
-            if not GEMINI_API_KEY:
-                await message.channel.send("Gemini API is not configured.")
-                return
             async with message.channel.typing():
-                try:
-                    model = genai.GenerativeModel('gemini-3.1-flash-lite-preview')
-                    response = await model.generate_content_async(prompt)
-                    await safe_send(message.channel, f"**Question:** {prompt}\n\n**Answer:** {response.text}")
-                except Exception as e:
-                    await message.channel.send(f"An error occurred while contacting Gemini: {e}")
+                result = await methods.execute_ask(prompt)
+                await safe_send(message.channel, result)
             return
 
     # If nothing matched, do nothing; keep slash commands and other events working.

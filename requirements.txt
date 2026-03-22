@@ -1,8 +1,9 @@
 fastapi
 uvicorn
-pinecone-client
-google-generativeai
+pinecone
+google-genai
 python-dotenv
 discord.py
-
+python-dotenv
 protobuf
+pinecone-client
