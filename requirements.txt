@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+pinecone-client
+google-generativeai
+python-dotenv
+discord.py
+
+protobuf
