@@ -7,3 +7,5 @@ discord.py
 python-dotenv
 protobuf
 pinecone-client
+sentence_transformers
+numpy

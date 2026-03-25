@@ -5,18 +5,14 @@ from dotenv import load_dotenv
 import discord
 from discord import app_commands
 from discord.utils import get
-import google.generativeai as genai
-import methods
 
-# --- Environment and API Setup ---
+# Load env variables FIRST before importing methods, so methods.py can access the API keys
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
-# Configure Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
+# Now we import our methods
+import methods
 
 # --- Bot Definition ---
 class VexBot(discord.Client):
@@ -36,9 +32,6 @@ class VexBot(discord.Client):
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True # Required for member management
-
-# Add a configurable text command prefix (can be overridden in .env)
-COMMAND_PREFIX = os.getenv("COMMAND_PREFIX", "!")
 
 client = VexBot(bot_intents=intents)
 
@@ -65,9 +58,9 @@ async def ask(interaction: discord.Interaction, prompt: str):
     await interaction.response.defer(thinking=True)
     result = await methods.execute_ask(prompt)
     if "An error occurred" in result or "not configured" in result:
-         await interaction.followup.send(result, ephemeral=True)
+        await interaction.followup.send(result, ephemeral=True)
     else:
-         await interaction.followup.send(result)
+        await interaction.followup.send(result)
 
 
 # --- Moderation Commands ---
@@ -110,14 +103,12 @@ async def quarantine(interaction: discord.Interaction, member: discord.Member, r
     if member == interaction.user:
         await interaction.response.send_message("You cannot quarantine yourself.", ephemeral=True)
         return
-        
+
     guild = interaction.guild
     quarantine_role = get(guild.roles, name="Quarantine")
 
     if not quarantine_role:
-        # Create the role if it doesn't exist
         quarantine_role = await guild.create_role(name="Quarantine", reason="Creating quarantine role for bot.")
-        # Deny permission to see channels for the new role
         for channel in guild.channels:
             await channel.set_permissions(quarantine_role, view_channel=False)
 
@@ -135,7 +126,6 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         raise error
 
 # --- Message Commands (Prefix and Suffix Style) ---
-# Add message-based command handling to support prefix (e.g. !ping) and simple suffix styles (e.g. ping!)
 @client.event
 async def on_message(message: discord.Message):
     # Ignore messages from bots (including ourselves)
@@ -152,7 +142,63 @@ async def on_message(message: discord.Message):
         else:
             await channel.send(text)
 
-    # Process prefix-style commands: e.g. !ping, !roll 20, !ask What is AI?
+    # --- NEW: Respond to @mentions and direct replies ---
+    is_mention = client.user in message.mentions
+    is_reply_to_bot = message.reference and message.reference.resolved and message.reference.resolved.author == client.user
+
+    if is_mention or is_reply_to_bot:
+        # Strip out the mention format (<@id> or <@!id>) from the message
+        prompt = content.replace(f'<@{client.user.id}>', '').replace(f'<@!{client.user.id}>', '').strip()
+
+        async with message.channel.typing():
+            # 1. Get Short-Term History (last 10 messages for immediate context)
+            history_msgs = []
+            async for msg in message.channel.history(limit=10, before=message):
+                if msg.content:
+                    history_msgs.append(f"{msg.author.display_name}: {msg.content}")
+            history_msgs.reverse()
+            short_term_history = "\n".join(history_msgs)
+
+            # 2. Grab images & referenced message context
+            images = []
+
+            # Check current message for images
+            for att in message.attachments:
+                if att.content_type and att.content_type.startswith('image/'):
+                    img_bytes = await att.read()
+                    images.append({'data': img_bytes, 'mime_type': att.content_type})
+
+            # If they are replying to a specific message, add that to the context!
+            if message.reference and message.reference.resolved:
+                replied_msg = message.reference.resolved
+                short_term_history += f"\n\n[USER REPLIED TO THIS MESSAGE FROM {replied_msg.author.display_name}]: {replied_msg.content}"
+
+                # Also grab images from the message they replied to!
+                for att in replied_msg.attachments:
+                    if att.content_type and att.content_type.startswith('image/'):
+                        img_bytes = await att.read()
+                        images.append({'data': img_bytes, 'mime_type': att.content_type})
+
+            # If there's no text prompt but there's an image, provide a fallback prompt
+            if not prompt and images:
+                prompt = "What is in this image?"
+
+            if prompt or images:
+                result = await methods.execute_ask(
+                    prompt,
+                    images=images,
+                    short_term_history=short_term_history
+                )
+
+                if len(result) > 1900:
+                    await message.reply(result[:1900] + "...")
+                else:
+                    await message.reply(result)
+            else:
+                await message.reply("Did you need something? You can ask me a question or send me an image!")
+        return
+
+    # Process prefix-style commands
     if content.startswith(prefix):
         parts = content[len(prefix):].split()
         if not parts:
@@ -196,14 +242,9 @@ async def on_message(message: discord.Message):
             )
             await message.channel.send(help_text)
             return
-
-        # Unknown prefix command: ignore or give a hint
-        # (Avoid being noisy — only respond when user asks for help or uses a known command.)
         return
 
-    # Process simple suffix-style commands like 'ping!' or 'roll 20!'
-    # We'll treat trailing punctuation like '!' or '?' as triggers when the first token matches a command.
-    # Example: "ping!" -> ping command, "roll 20!" -> roll command.
+    # Process simple suffix-style commands
     if content.endswith("!") or content.endswith("?"):
         stripped = content.rstrip('!?.').strip()
         if not stripped:
@@ -236,8 +277,12 @@ async def on_message(message: discord.Message):
                 await safe_send(message.channel, result)
             return
 
-    # If nothing matched, do nothing; keep slash commands and other events working.
- 
+    # --- LIVE DATA INGESTION ---
+    # If the message made it all the way down here, it means it wasn't a command.
+    # That means it's normal conversation! Let's embed it into the database.
+    author_name = message.author.global_name or message.author.name
+    await methods.ingest_live_message(author_name, content)
+
 # --- Running the Bot ---
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
